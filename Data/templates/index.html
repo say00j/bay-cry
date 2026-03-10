@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Baby Cry — Real-time Monitor</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <style>
+    /* ── Live Mic Panel ─────────────────────────────────────── */
+    .live-mic-panel {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      border: 1px solid rgba(108, 92, 231, 0.35);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 24px rgba(108,92,231,0.15);
+    }
+    .live-mic-panel h2 {
+      color: #fff;
+      margin: 0 0 16px 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pulse-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #6C5CE7;
+      display: inline-block;
+    }
+    .pulse-dot.active {
+      background: #00cec9;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%,100%{box-shadow:0 0 0 0 rgba(0,206,201,0.5)}
+      50%{box-shadow:0 0 0 8px rgba(0,206,201,0)}
+    }
+
+    #waveformCanvas {
+      width: 100%;
+      height: 72px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      display: block;
+      margin-bottom: 14px;
+    }
+
+    .mic-controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom: 16px; }
+    #micToggleBtn {
+      padding: 9px 22px;
+      border-radius: 9px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      background: #6C5CE7;
+      color: #fff;
+      transition: background 0.2s, transform 0.1s;
+    }
+    #micToggleBtn:hover { background: #5546c7; transform: scale(1.02); }
+    #micToggleBtn.recording { background: #d63031; }
+    #micToggleBtn.recording:hover { background: #b52a2a; }
+
+    #micStatus {
+      font-size: 0.82rem;
+      color: #a29bfe;
+      font-weight: 500;
+    }
+    #micStatus.active { color: #00cec9; }
+
+    /* Result card */
+    #livePredCard {
+      background: rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: 14px 16px;
+      display: none;
+    }
+    #livePredCard.visible { display: block; }
+    .pred-row { display:flex; align-items:center; gap: 12px; margin-bottom: 8px; }
+    #livePredLabel {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #fff;
+      text-transform: capitalize;
+      letter-spacing: 0.01em;
+    }
+    #livePredConf {
+      font-size: 0.85rem;
+      color: #a29bfe;
+      background: rgba(108,92,231,0.2);
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+    .conf-bar-wrap { margin-bottom: 10px; }
+    .conf-bar-bg {
+      background: rgba(255,255,255,0.1);
+      border-radius: 99px;
+      height: 7px;
+      overflow: hidden;
+    }
+    #confBarFill {
+      height: 100%;
+      border-radius: 99px;
+      background: linear-gradient(90deg, #6C5CE7, #00cec9);
+      width: 0%;
+      transition: width 0.5s ease;
+    }
+    #livePredGuidance {
+      font-size: 0.82rem;
+      color: #b2bec3;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+
+    /* All-probs mini bar chart */
+    #allProbsWrap {
+      margin-top: 12px;
+      display: none;
+    }
+    #allProbsWrap.visible { display: block; }
+    .prob-row {
+      display: grid;
+      grid-template-columns: 90px 1fr 42px;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+      font-size: 0.78rem;
+      color: #dfe6e9;
+    }
+    .prob-bar-bg {
+      background: rgba(255,255,255,0.08);
+      border-radius: 99px;
+      height: 6px;
+      overflow: hidden;
+    }
+    .prob-bar-fill {
+      height: 100%;
+      border-radius: 99px;
+      background: rgba(108,92,231,0.6);
+      transition: width 0.4s ease;
+    }
+    .prob-bar-fill.top { background: linear-gradient(90deg,#6C5CE7,#00cec9); }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <div class="brand">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+          <rect width="24" height="24" rx="6" fill="#6C5CE7" />
+          <path d="M7 12c0-1.657 1.343-3 3-3s3 1.343 3 3-1.343 3-3 3-3-1.343-3-3z" fill="#fff" />
+        </svg>
+        <div>
+          <h1>Baby Cry</h1>
+          <p class="muted">Real‑time monitoring &amp; parental guidance</p>
+        </div>
+      </div>
+      <nav>
+        <button id="startBtn" class="btn primary">Start</button>
+        <button id="stopBtn" class="btn outline">Stop</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container main-grid">
+    <!-- ── LIVE MIC PANEL (full width above grid) ─────────────── -->
+    <div class="live-mic-panel" style="grid-column:1/-1">
+      <h2>
+        <span class="pulse-dot" id="pulseDot"></span>
+        🎙️ Live Microphone Detection
+      </h2>
+
+      <canvas id="waveformCanvas" width="900" height="72"></canvas>
+
+      <div class="mic-controls">
+        <button id="micToggleBtn">▶ Start Live Mic</button>
+        <span id="micStatus">Stopped — click to start</span>
+      </div>
+
+      <!-- FILE UPLOAD SECTION -->
+      <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.1);">
+        <h3 style="color: #fff; font-size: 1rem; margin-bottom: 12px;">📁 Upload Audio File (Backup Testing)</h3>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <input type="file" id="audioFileInput" accept="audio/*,.wav,.mp3,.m4a,.ogg" 
+                 style="padding: 8px; border-radius: 8px; background: rgba(255,255,255,0.1); 
+                        color: #fff; border: 1px solid rgba(108,92,231,0.3); cursor: pointer;">
+          <button id="uploadBtn" class="btn" style="padding: 9px 22px; border-radius: 9px; border: none; 
+                  cursor: pointer; font-weight: 600; font-size: 0.9rem; background: #00b894; 
+                  color: #fff;">Upload & Predict</button>
+          <span id="uploadStatus" style="font-size: 0.82rem; color: #a29bfe;"></span>
+        </div>
+      </div>
+
+      <div id="livePredCard">
+        <div class="pred-row">
+          <span id="livePredLabel">—</span>
+          <span id="livePredConf">—%</span>
+        </div>
+        <div class="conf-bar-wrap">
+          <div class="conf-bar-bg"><div id="confBarFill"></div></div>
+        </div>
+        <div id="livePredGuidance"></div>
+        <div id="allProbsWrap"></div>
+      </div>
+    </div>
+
+    <!-- ── Controls panel ─────────────────────────────────────── -->
+    <section class="panel controls">
+      <h2>Server Monitor Controls</h2>
+      <div class="control-row">
+        <label class="toggle">
+          <input type="checkbox" id="email_on_detect">
+          <span class="toggle-slider"></span>
+        </label>
+        <div class="control-labels">
+          <strong>Email on detection</strong>
+          <div class="muted">Send an alert email after each detection (throttled).</div>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Throttle (seconds)</label>
+        <input id="throttle" type="number" value="60" min="5" />
+      </div>
+
+      <div class="actions">
+        <button id="sendReportBtn" class="btn secondary">Send Latest Report</button>
+        <button id="refreshBtn" class="btn ghost">Refresh Feed</button>
+      </div>
+
+      <div class="status-card">
+        <div>Server Monitor Status</div>
+        <div id="statusText" class="status-badge muted">unknown</div>
+      </div>
+
+      <div class="help muted">Note: Email credentials come from server environment; do not expose secrets in the browser.</div>
+    </section>
+
+    <section class="panel feed">
+      <h2>Recent Detections</h2>
+      <ul id="feedList" class="feed-list">
+        <li class="empty">No detections yet — start monitoring to see live updates.</li>
+      </ul>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" aria-live="polite"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
