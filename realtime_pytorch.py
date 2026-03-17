@@ -27,6 +27,7 @@ monitor_thread: Optional[threading.Thread] = None
 monitor_stop_event: Optional[threading.Event] = None
 monitor_lock = threading.Lock()
 last_detections = deque(maxlen=200)  # store recent detections
+window_results = deque(maxlen=5)  # store (label, confidence) for last 5 valid windows
 monitor_settings = {
     'last_email_sent': 0.0,
     'last_email_attempt': 0.0,
@@ -628,14 +629,14 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
                          app_password: Optional[str]=None,
                          throttle_seconds: int=60):
 
-    print("Starting real-time baby cry monitoring (Sliding Window)...")
+    print("Starting real-time baby cry monitoring (Sliding Window + Max Confidence)...")
     print(f"Sampling at {SAMPLE_RATE} Hz | Window={DURATION}s | Step=1s")
     print(f"Using device: {device}")
     print("Press Ctrl+C to stop.\n")
 
     # ───── Sliding Window Setup ─────
-    BUFFER_SECONDS = DURATION          # 5 sec window
-    STEP_SECONDS = 1                   # update every 1 sec
+    BUFFER_SECONDS = DURATION
+    STEP_SECONDS = 1
 
     BUFFER_SIZE = SAMPLE_RATE * BUFFER_SECONDS
     STEP_SIZE = SAMPLE_RATE * STEP_SECONDS
@@ -653,7 +654,6 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
 
             print("Listening (1 sec chunk)...")
 
-            # ───── Record small chunk ─────
             audio = sd.rec(STEP_SIZE,
                            samplerate=SAMPLE_RATE,
                            channels=1,
@@ -662,13 +662,12 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
 
             new_chunk = audio.flatten()
 
-            # ───── Update circular buffer ─────
+            # Update circular buffer
             audio_buffer = np.roll(audio_buffer, -STEP_SIZE)
             audio_buffer[-STEP_SIZE:] = new_chunk
 
             buffer_filled = min(buffer_filled + STEP_SIZE, BUFFER_SIZE)
 
-            # Wait until buffer fully filled once
             if buffer_filled < BUFFER_SIZE:
                 print("Buffer warming up...")
                 continue
@@ -677,31 +676,30 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
 
             # ───── Stage 1: Energy Check ─────
             audio_energy = np.sqrt(np.mean(signal**2))
-            ENERGY_THRESHOLD = 0.01
+            ENERGY_THRESHOLD = 0.003  # Very permissive threshold to catch all potential baby cries, even very quiet ones
 
             if audio_energy < ENERGY_THRESHOLD:
                 print(f"Stage 1 - Low energy ({audio_energy:.4f}) - skipping")
                 continue
 
-            # ───── Stage 2: Frequency Analysis ─────
+            print(f"Energy: {audio_energy:.4f}")
+
             freq_is_baby_cry, energy_ratio, dominant_freq_range = analyze_frequency_characteristics(signal)
             if not freq_is_baby_cry:
-                print(f"Stage 2 - Frequency reject ({energy_ratio:.2f}) dominant={dominant_freq_range}")
+                print(f"Rejected: Frequency (ratio={energy_ratio:.2f}, dominant={dominant_freq_range})")
                 continue
 
-            # ───── Stage 3: Harmonic Structure ─────
             spectral_is_baby_cry, hnr_db, num_peaks = check_harmonic_structure(signal)
             if not spectral_is_baby_cry:
-                print(f"Stage 3 - Spectral reject HNR={hnr_db:.2f}")
+                print(f"Rejected: Spectral (HNR={hnr_db:.2f}, peaks={num_peaks})")
                 continue
 
-            # ───── Stage 4: Temporal Pattern ─────
             temporal_is_baby_cry, burst_durations, valid_burst_count = detect_cry_rhythm(signal)
             if not temporal_is_baby_cry:
-                print(f"Stage 4 - Temporal reject valid_bursts={valid_burst_count}")
+                print(f"Rejected: Temporal (valid_bursts={valid_burst_count})")
                 continue
 
-            print(f"Pre-filter PASS | Energy={audio_energy:.4f}")
+            print("Pre-filter PASS")
 
             # ───── Stage 5: Model Prediction ─────
             X_new = extract_features_from_signal(signal)
@@ -717,17 +715,40 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
 
             CONFIDENCE_THRESHOLD = 0.24
 
-            if pred_label == 'silence':
-                print(f"Model predicted silence ({confidence:.2f})")
+            if pred_label == 'silence' or confidence < CONFIDENCE_THRESHOLD:
                 continue
 
-            if confidence < CONFIDENCE_THRESHOLD:
-                print(f"Low confidence {pred_label} ({confidence:.2f})")
+            # 🧠 Store result for decision
+           # 🧠 Store result for decision
+            window_results.append((pred_label, confidence))
+
+            window_num = len(window_results)
+
+            print("\n──────── WINDOW ANALYSIS ────────")
+            print(f"Window {window_num}/5")
+            print(f"Prediction : {pred_label}")
+            print(f"Confidence : {confidence:.4f}")
+            print("────────────────────────────────")
+
+            # ───── Wait until 5 windows collected ─────
+            if len(window_results) < 5:
                 continue
+            print("\n===== WINDOW SUMMARY (Last 5) =====")
+            for i, (lbl, conf) in enumerate(window_results, 1):
+                print(f"{i}. {lbl:<12}  {conf:.4f}")
+            print("===================================")
+            # 🏆 Pick highest-confidence prediction
+            best_label, best_conf = max(window_results, key=lambda x: x[1])
+
+            # Clear for next cycle
+            window_results.clear()
+
+            pred_label = best_label
+            confidence = best_conf
 
             now = datetime.now()
 
-            print(f"\n🔥 DETECTED: {pred_label} | Conf={confidence:.2f}")
+            print(f"\n🔥 FINAL DETECTED: {pred_label} | Confidence={confidence:.2f}")
 
             # ───── Log + Memory ─────
             log_event_realtime(str(pred_label), confidence)
