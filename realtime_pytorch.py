@@ -621,67 +621,91 @@ def report_email(pred_label, advice, doctor, to_email: Optional[str]=None, from_
         print(f"Email send failed (attempts={monitor_settings['consecutive_failures']}): {err}")
     return ok, err
     
-def run_realtime_monitor(stop_event: Optional[threading.Event]=None, email_on_detect: bool=False, email_recipient: Optional[str]=None, from_email: Optional[str]=None, app_password: Optional[str]=None, throttle_seconds: int=60):
-    """Run the real-time baby cry monitor loop with PyTorch model."""
-    print("Starting real-time baby cry monitoring (PyTorch)...")
-    print(f"Sampling from microphone at {SAMPLE_RATE} Hz, window = {DURATION} seconds.")
+def run_realtime_monitor(stop_event: Optional[threading.Event]=None,
+                         email_on_detect: bool=False,
+                         email_recipient: Optional[str]=None,
+                         from_email: Optional[str]=None,
+                         app_password: Optional[str]=None,
+                         throttle_seconds: int=60):
+
+    print("Starting real-time baby cry monitoring (Sliding Window)...")
+    print(f"Sampling at {SAMPLE_RATE} Hz | Window={DURATION}s | Step=1s")
     print(f"Using device: {device}")
     print("Press Ctrl+C to stop.\n")
 
+    # ───── Sliding Window Setup ─────
+    BUFFER_SECONDS = DURATION          # 5 sec window
+    STEP_SECONDS = 1                   # update every 1 sec
+
+    BUFFER_SIZE = SAMPLE_RATE * BUFFER_SECONDS
+    STEP_SIZE = SAMPLE_RATE * STEP_SECONDS
+
+    audio_buffer = np.zeros(BUFFER_SIZE, dtype=np.float32)
+    buffer_filled = 0
+
     try:
         last_sent = monitor_settings.get('last_email_sent', 0.0)
+
         while True:
             if stop_event is not None and stop_event.is_set():
                 print("Stop event set — exiting monitor loop.")
                 break
 
-            print("Listening...")                                # ==============================Debug log to indicate we're starting a new recording==================
-            audio = sd.rec(int(DURATION * SAMPLE_RATE),
+            print("Listening (1 sec chunk)...")
+
+            # ───── Record small chunk ─────
+            audio = sd.rec(STEP_SIZE,
                            samplerate=SAMPLE_RATE,
                            channels=1,
                            dtype='float32')
             sd.wait()
 
-            signal = audio.flatten()
-            
-            # Stage 1: Energy check (existing) - reject silence
-            audio_energy = np.sqrt(np.mean(signal**2))  # RMS energy
-            ENERGY_THRESHOLD = 0.01  # Adjust based on your microphone
-            
-            if audio_energy < ENERGY_THRESHOLD:
-                print(f"Stage 1 - Low energy detected ({audio_energy:.4f}) - likely silence, skipping prediction")
+            new_chunk = audio.flatten()
+
+            # ───── Update circular buffer ─────
+            audio_buffer = np.roll(audio_buffer, -STEP_SIZE)
+            audio_buffer[-STEP_SIZE:] = new_chunk
+
+            buffer_filled = min(buffer_filled + STEP_SIZE, BUFFER_SIZE)
+
+            # Wait until buffer fully filled once
+            if buffer_filled < BUFFER_SIZE:
+                print("Buffer warming up...")
                 continue
-            
-            # Hybrid Detection Pipeline - Hard Rejection
-            # Reject immediately if ANY stage fails (all stages must pass)
-            # This ensures non-baby sounds are filtered out before reaching the model
-            
-            # Stage 2: Frequency analysis
+
+            signal = audio_buffer.copy()
+
+            # ───── Stage 1: Energy Check ─────
+            audio_energy = np.sqrt(np.mean(signal**2))
+            ENERGY_THRESHOLD = 0.01
+
+            if audio_energy < ENERGY_THRESHOLD:
+                print(f"Stage 1 - Low energy ({audio_energy:.4f}) - skipping")
+                continue
+
+            # ───── Stage 2: Frequency Analysis ─────
             freq_is_baby_cry, energy_ratio, dominant_freq_range = analyze_frequency_characteristics(signal)
             if not freq_is_baby_cry:
-                print(f"Stage 2 - Non-baby sound detected (frequency analysis) - energy_ratio: {energy_ratio:.2f} (threshold: {FREQUENCY_ENERGY_THRESHOLD:.2f}), dominant: {dominant_freq_range} - skipping prediction\n")
+                print(f"Stage 2 - Frequency reject ({energy_ratio:.2f}) dominant={dominant_freq_range}")
                 continue
-            
-            # Stage 3: Spectral pattern matching
+
+            # ───── Stage 3: Harmonic Structure ─────
             spectral_is_baby_cry, hnr_db, num_peaks = check_harmonic_structure(signal)
             if not spectral_is_baby_cry:
-                print(f"Stage 3 - Non-baby sound detected (spectral pattern) - HNR: {hnr_db:.2f} dB (threshold: {HARMONIC_NOISE_RATIO_THRESHOLD:.2f}), peaks: {num_peaks} - skipping prediction\n")
+                print(f"Stage 3 - Spectral reject HNR={hnr_db:.2f}")
                 continue
-            
-            # Stage 4: Temporal pattern analysis
+
+            # ───── Stage 4: Temporal Pattern ─────
             temporal_is_baby_cry, burst_durations, valid_burst_count = detect_cry_rhythm(signal)
             if not temporal_is_baby_cry:
-                print(f"Stage 4 - Non-baby sound detected (temporal pattern) - valid_bursts: {valid_burst_count} (need at least 1 burst of {BURST_DURATION_MIN}-{BURST_DURATION_MAX}s) - skipping prediction\n")
+                print(f"Stage 4 - Temporal reject valid_bursts={valid_burst_count}")
                 continue
-            
-            # All stages passed - proceed to model classification
-            print(f"Pre-filtering: PASS (frequency: {energy_ratio:.2f}, HNR: {hnr_db:.2f} dB, valid_bursts: {valid_burst_count})")
-            
-            
-            # Stage 5: Model classification - classify baby cry type
+
+            print(f"Pre-filter PASS | Energy={audio_energy:.4f}")
+
+            # ───── Stage 5: Model Prediction ─────
             X_new = extract_features_from_signal(signal)
 
-            # PyTorch inference
             with torch.no_grad():
                 outputs = model(X_new)
                 probs = torch.softmax(outputs, dim=1)
@@ -690,25 +714,26 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None, email_on_de
                 confidence = confidence.item()
 
             pred_label = labels[idx]
-            
-            # Standard confidence threshold
+
             CONFIDENCE_THRESHOLD = 0.24
-            
-            # Special case: "silence" prediction means no baby cry detected
+
             if pred_label == 'silence':
-                print(f"⚠️  Model predicted 'silence' (confidence: {confidence:.2f}) - No baby cry detected\n")
+                print(f"Model predicted silence ({confidence:.2f})")
                 continue
-            
+
             if confidence < CONFIDENCE_THRESHOLD:
-                print(f"⚠️  Low confidence detection: {pred_label} ({confidence:.2f}) - threshold: {CONFIDENCE_THRESHOLD:.2f} - No baby cry detected\n")
+                print(f"Low confidence {pred_label} ({confidence:.2f})")
                 continue
 
             now = datetime.now()
-            print(f"\nDetected: {pred_label} (confidence: {confidence:.2f}, energy: {audio_energy:.4f})")
 
-            # Log and keep in memory
+            print(f"\n🔥 DETECTED: {pred_label} | Conf={confidence:.2f}")
+
+            # ───── Log + Memory ─────
             log_event_realtime(str(pred_label), confidence)
+
             guidance = GUIDANCE.get(str(pred_label), None)
+
             entry = {
                 'date': now.date().isoformat(),
                 'time': now.time().strftime('%H:%M:%S'),
@@ -716,9 +741,10 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None, email_on_de
                 'confidence': f"{confidence:.4f}",
                 'guidance': guidance
             }
+
             last_detections.append(entry)
 
-            # Email-on-detect (with throttle + backoff on failures)
+            # ───── Email Alert ─────
             if email_on_detect and (email_recipient or os.environ.get('CRY_TO_EMAIL')):
                 recipient = email_recipient or os.environ.get('CRY_TO_EMAIL')
                 now_ts = time.time()
@@ -730,28 +756,29 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None, email_on_de
                 effective_throttle = throttle_seconds * backoff_factor
 
                 if now_ts - last_success >= effective_throttle:
-                    ok, err = report_email(pred_label, guidance['advice'] if guidance else '', guidance['doctor'] if guidance else '', to_email=recipient, from_email=from_email, app_password=app_password)
+                    ok, err = report_email(pred_label,
+                                           guidance['advice'] if guidance else '',
+                                           guidance['doctor'] if guidance else '',
+                                           to_email=recipient,
+                                           from_email=from_email,
+                                           app_password=app_password)
+
                     if ok:
-                        last_sent = monitor_settings.get('last_email_sent', now_ts)
-                        print('✅ Mail sent for latest detection')
+                        print("✅ Email sent")
                     else:
-                        print(f"❌ Failed to send detection email: {err}")
-                else:
-                    remaining = int(effective_throttle - (now_ts - last_success))
-                    print(f"Email suppressed to avoid spamming/backoff; will allow in {remaining}s")
+                        print(f"❌ Email failed: {err}")
 
             if guidance:
-                print("Suggested parental guidance (not medical advice):")
-                print(f"- What you can try now: {guidance['advice']}")
-                print(f"- When to consult a doctor: {guidance['doctor']}\n")
-            else:
-                print("No specific guidance available for this label yet.\n")
+                print("Guidance:")
+                print(f"- Try now: {guidance['advice']}")
+                print(f"- Doctor: {guidance['doctor']}\n")
 
     except KeyboardInterrupt:
-        print("\nReal-time monitoring stopped by user.")
+        print("\nMonitoring stopped by user.")
+
     finally:
         monitor_settings['last_email_sent'] = last_sent
-        print('Monitor loop exited.')
+        print("Monitor loop exited.")
 
 def start_monitor(email_on_detect: bool=False, email_recipient: Optional[str]=None, from_email: Optional[str]=None, app_password: Optional[str]=None, throttle_seconds: int=60):
     """Start the monitor in a background thread."""
