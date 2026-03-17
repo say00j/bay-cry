@@ -16,7 +16,7 @@ from typing import Optional
 # Domain-adaptation preprocessing for phone-speaker audio
 try:
     from audio_preprocessing import preprocess_phone_audio
-    PHONE_PREPROCESSING = False # Force-disabled to prevent feature distortion
+    PHONE_PREPROCESSING = True # Force-disabled to prevent feature distortion
     print("Phone-speaker audio preprocessing loaded (currently DISABLED)")
 except ImportError:
     PHONE_PREPROCESSING = False
@@ -635,7 +635,7 @@ def run_realtime_monitor(stop_event: Optional[threading.Event]=None, email_on_de
                 print("Stop event set — exiting monitor loop.")
                 break
 
-            print("Listening...")
+            print("Listening...")                                # ==============================Debug log to indicate we're starting a new recording==================
             audio = sd.rec(int(DURATION * SAMPLE_RATE),
                            samplerate=SAMPLE_RATE,
                            channels=1,
